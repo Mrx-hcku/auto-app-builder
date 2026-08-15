@@ -1,0 +1,66 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      command:
+        description: 'AI command (optional - leave blank to just build)'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Call Groq API (optional AI step)
+        if: ${{ github.event.inputs.command != '' }}
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          COMMAND="${{ github.event.inputs.command }}"
+          RESPONSE=$(curl -s https://api.groq.com/openai/v1/chat/completions \
+            -H "Authorization: Bearer $GROQ_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg cmd "$COMMAND" '{
+              model: "llama-3.3-70b-versatile",
+              messages: [
+                {role: "system", content: "You are an Android Java code generator. Output ONLY the complete raw Java code for MainActivity.java based on the instruction. No markdown, no explanation, no backticks."},
+                {role: "user", content: $cmd}
+              ]
+            }')")
+          echo "$RESPONSE" | jq -r '.choices[0].message.content' > app/src/main/java/com/mycompany/calc/MainActivity.java
+          cat app/src/main/java/com/mycompany/calc/MainActivity.java
+
+      - name: Commit AI changes
+        if: ${{ github.event.inputs.command != '' }}
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add app/src/main/java/com/mycompany/calc/MainActivity.java
+          git commit -m "AI update: ${{ github.event.inputs.command }}" || echo "No changes to commit"
+          git push || echo "Push skipped"
+
+      - name: Grant execute permission for gradlew
+        run: |
+          if [ ! -f gradlew ]; then
+            gradle wrapper --gradle-version 7.6
+          fi
+          chmod +x gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
