@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       command:
-        description: 'AI command (optional - leave blank to just build)'
+        description: 'Describe the app you want (e.g. "a notes app with add/delete")'
         required: false
         default: ''
 
@@ -21,23 +21,88 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Call Groq API (optional AI step)
+      - name: Generate app via Groq API
         if: ${{ github.event.inputs.command != '' }}
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: |
           COMMAND="${{ github.event.inputs.command }}"
+
+          SYSTEM_PROMPT='You are an expert Android app generator. Given a description, output ONLY a single valid JSON object (no markdown, no backticks, no explanation) with EXACTLY these keys:
+
+          "app_name": short display name for the app (2-3 words max)
+          "permissions": space-separated Android manifest permission names needed beyond INTERNET (which is always included), e.g. "CAMERA" or empty string
+          "main_activity": complete raw Java code for MainActivity.java. Requirements:
+            - MUST start with "package com.mycompany.calc;"
+            - MUST extend androidx.appcompat.app.AppCompatActivity
+            - Build the core feature the user described using standard Android widgets and androidx/material/recyclerview/cardview/gridlayout libraries already included
+            - MUST integrate Unity Ads using UnityAds.initialize with game ID "800355711", using placement IDs "Banner_Android" for a banner ad shown at the bottom of the screen (using com.unity3d.services.banners.BannerView), "Interstitial_Android" for an interstitial ad shown at a natural break in app usage (e.g. after a button action), and "Rewarded_Android" for a rewarded ad triggered by a dedicated button in the UI labeled "Watch Ad"
+            - Handle ad load/show failures gracefully with try/catch or listener error callbacks so the app never crashes if ads fail to load
+            - Must be a single complete compilable file, all view IDs referenced must exist in the generated layout
+          "layout_xml": complete raw XML for res/layout/activity_main.xml. Requirements:
+            - Use LinearLayout or ConstraintLayout as root
+            - Apply clean modern visual style: adequate padding/margins (12-16dp), rounded corner buttons using android:background with a simple drawable or Material button style, a consistent color scheme (pick one accent color), readable text sizes (16sp body, 22sp+ headers)
+            - Include a FrameLayout or container with id "adContainer" near the bottom for the banner ad
+            - Include a Button with id "watchAdButton" text "Watch Ad" somewhere reasonable in the layout
+            - Every view ID used in main_activity must exist here
+          "extra_strings": additional string resources beyond app_name, as JSON object of name:value pairs, or {}
+
+          Ensure Java and XML are syntactically correct and fully consistent with each other. Keep the app to a single Activity.'
+
           RESPONSE=$(curl -s https://api.groq.com/openai/v1/chat/completions \
             -H "Authorization: Bearer $GROQ_API_KEY" \
             -H "Content-Type: application/json" \
-            -d "$(jq -n --arg cmd "$COMMAND" '{
+            -d "$(jq -n --arg sys "$SYSTEM_PROMPT" --arg cmd "$COMMAND" '{
               model: "llama-3.3-70b-versatile",
+              temperature: 0.3,
               messages: [
-                {role: "system", content: "You are an Android Java code generator. Output ONLY the complete raw Java code for MainActivity.java based on the instruction. No markdown, no explanation, no backticks."},
+                {role: "system", content: $sys},
                 {role: "user", content: $cmd}
               ]
             }')")
-          echo "$RESPONSE" | jq -r '.choices[0].message.content' > app/src/main/java/com/mycompany/calc/MainActivity.java
+
+          CONTENT=$(echo "$RESPONSE" | jq -r '.choices[0].message.content')
+          echo "$CONTENT" > /tmp/ai_output.json
+          sed -i '/^```/d' /tmp/ai_output.json
+
+          APP_NAME=$(jq -r '.app_name' /tmp/ai_output.json)
+          PERMISSIONS=$(jq -r '.permissions' /tmp/ai_output.json)
+          MAIN_ACTIVITY=$(jq -r '.main_activity' /tmp/ai_output.json)
+          LAYOUT_XML=$(jq -r '.layout_xml' /tmp/ai_output.json)
+
+          echo "$MAIN_ACTIVITY" > app/src/main/java/com/mycompany/calc/MainActivity.java
+          echo "$LAYOUT_XML" > app/src/main/res/layout/activity_main.xml
+
+          {
+            echo '<resources>'
+            echo "    <string name=\"app_name\">${APP_NAME}</string>"
+            jq -r '.extra_strings | to_entries[] | "    <string name=\"" + .key + "\">" + .value + "</string>"' /tmp/ai_output.json
+            echo '</resources>'
+          } > app/src/main/res/values/strings.xml
+
+          {
+            echo '<?xml version="1.0" encoding="utf-8"?>'
+            echo '<manifest xmlns:android="http://schemas.android.com/apk/res/android">'
+            echo '    <uses-permission android:name="android.permission.INTERNET" />'
+            echo '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />'
+            for p in $PERMISSIONS; do
+              echo "    <uses-permission android:name=\"android.permission.${p}\" />"
+            done
+            echo '    <application'
+            echo '        android:allowBackup="true"'
+            echo '        android:label="@string/app_name"'
+            echo '        android:theme="@style/Theme.AppCompat.Light">'
+            echo '        <activity android:name=".MainActivity" android:exported="true">'
+            echo '            <intent-filter>'
+            echo '                <action android:name="android.intent.action.MAIN" />'
+            echo '                <category android:name="android.intent.category.LAUNCHER" />'
+            echo '            </intent-filter>'
+            echo '        </activity>'
+            echo '    </application>'
+            echo '</manifest>'
+          } > app/src/main/AndroidManifest.xml
+
+          echo "----- Generated MainActivity.java -----"
           cat app/src/main/java/com/mycompany/calc/MainActivity.java
 
       - name: Commit AI changes
@@ -45,8 +110,8 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add app/src/main/java/com/mycompany/calc/MainActivity.java
-          git commit -m "AI update: ${{ github.event.inputs.command }}" || echo "No changes to commit"
+          git add app/src/main/java/com/mycompany/calc/MainActivity.java app/src/main/res/layout/activity_main.xml app/src/main/res/values/strings.xml app/src/main/AndroidManifest.xml
+          git commit -m "AI generated: ${{ github.event.inputs.command }}" || echo "No changes to commit"
           git push || echo "Push skipped"
 
       - name: Setup Gradle
