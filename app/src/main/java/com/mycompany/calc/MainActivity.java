@@ -1,85 +1,158 @@
 package com.mycompany.calc;
 
+import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.widget.Button;
 import android.widget.EditText;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.recyclerview.widget.LinearLayoutManager;
+import androidx.recyclerview.widget.RecyclerView;
+import org.json.JSONException;
+import org.json.JSONObject;
+import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.UUID;
+import io.socket.client.IO;
+import io.socket.client.Socket;
 
 public class MainActivity extends AppCompatActivity {
-
-    EditText display;
-    String currentInput = "";
-    double result = 0;
-    char pendingOp = ' ';
+    private Socket socket;
+    private EditText messageInput;
+    private RecyclerView recyclerViewChat;
+    private ChatAdapter chatAdapter;
+    private List<ChatMessage> messageList = new ArrayList<>();
+    private String currentUsername = "GuestUser";
+    private AppDatabase db;
+    private final String CURRENT_ROOM = "global_room";
+    private final String SERVER_URL = "https://messgram-k4vn.onrender.com/";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        display = findViewById(R.id.display);
+        SharedPreferences prefs = getSharedPreferences("MessgramPrefs", MODE_PRIVATE);
+        currentUsername = prefs.getString("username", "GuestUser");
 
-        int[] numberIds = {R.id.btn0, R.id.btn1, R.id.btn2, R.id.btn3, R.id.btn4,
-                R.id.btn5, R.id.btn6, R.id.btn7, R.id.btn8, R.id.btn9};
+        db = AppDatabase.getInstance(this);
 
-        for (int id : numberIds) {
-            Button b = findViewById(id);
-            b.setOnClickListener(v -> {
-                currentInput += ((Button) v).getText().toString();
-                display.setText(currentInput);
-            });
+        messageInput = findViewById(R.id.messageInput);
+        Button sendButton = findViewById(R.id.sendButton);
+        recyclerViewChat = findViewById(R.id.recyclerViewChat);
+
+        LinearLayoutManager layoutManager = new LinearLayoutManager(this);
+        layoutManager.setStackFromEnd(true);
+        recyclerViewChat.setLayoutManager(layoutManager);
+
+        chatAdapter = new ChatAdapter(messageList);
+        recyclerViewChat.setAdapter(chatAdapter);
+
+        // Load cached offline messages instantly
+        loadLocalCachedMessages();
+
+        try {
+            socket = IO.socket(SERVER_URL);
+        } catch (URISyntaxException e) {
+            e.printStackTrace();
         }
 
-        findViewById(R.id.btnDot).setOnClickListener(v -> {
-            if (!currentInput.contains(".")) {
-                currentInput += ".";
-                display.setText(currentInput);
+        socket.connect();
+        socket.emit("join_room", CURRENT_ROOM);
+
+        socket.on("load_history", args -> {
+            try {
+                org.json.JSONArray history = (org.json.JSONArray) args[0];
+                List<MessageEntity> entities = new ArrayList<>();
+                
+                runOnUiThread(() -> messageList.clear());
+
+                for (int i = 0; i < history.length(); i++) {
+                    JSONObject obj = history.getJSONObject(i);
+                    String msgId = obj.optString("_id", UUID.randomUUID().toString());
+                    String sender = obj.getString("sender");
+                    String msg = obj.optString("message", "");
+                    String mediaUrl = obj.optString("mediaUrl", "");
+                    long timestamp = obj.optLong("timestamp", System.currentTimeMillis());
+
+                    entities.add(new MessageEntity(msgId, CURRENT_ROOM, sender, msg, mediaUrl, "", false, timestamp));
+
+                    boolean isMine = sender.equals(currentUsername);
+                    runOnUiThread(() -> messageList.add(new ChatMessage(sender, msg, mediaUrl, isMine)));
+                }
+
+                db.messageDao().insertAll(entities);
+                runOnUiThread(() -> {
+                    chatAdapter.notifyDataSetChanged();
+                    if (!messageList.isEmpty()) {
+                        recyclerViewChat.scrollToPosition(messageList.size() - 1);
+                    }
+                });
+            } catch (Exception e) {
+                e.printStackTrace();
             }
         });
 
-        findViewById(R.id.btnClear).setOnClickListener(v -> {
-            currentInput = "";
-            result = 0;
-            pendingOp = ' ';
-            display.setText("0");
+        socket.on("receive_message", args -> {
+            JSONObject data = (JSONObject) args[0];
+            try {
+                String msgId = data.optString("_id", UUID.randomUUID().toString());
+                String sender = data.getString("sender");
+                String msg = data.optString("message", "");
+                String mediaUrl = data.optString("mediaUrl", "");
+                long timestamp = System.currentTimeMillis();
+
+                db.messageDao().insertMessage(new MessageEntity(msgId, CURRENT_ROOM, sender, msg, mediaUrl, "", false, timestamp));
+
+                boolean isMine = sender.equals(currentUsername);
+                runOnUiThread(() -> {
+                    messageList.add(new ChatMessage(sender, msg, mediaUrl, isMine));
+                    chatAdapter.notifyItemInserted(messageList.size() - 1);
+                    recyclerViewChat.scrollToPosition(messageList.size() - 1);
+                });
+            } catch (JSONException e) {
+                e.printStackTrace();
+            }
         });
 
-        findViewById(R.id.btnPlus).setOnClickListener(v -> applyOp('+'));
-        findViewById(R.id.btnMinus).setOnClickListener(v -> applyOp('-'));
-        findViewById(R.id.btnMultiply).setOnClickListener(v -> applyOp('*'));
-        findViewById(R.id.btnDivide).setOnClickListener(v -> applyOp('/'));
-
-        findViewById(R.id.btnEquals).setOnClickListener(v -> {
-            calculate();
-            display.setText(String.valueOf(result));
-            currentInput = String.valueOf(result);
-            pendingOp = ' ';
-        });
-    }
-
-    void applyOp(char op) {
-        if (!currentInput.isEmpty()) {
-            calculate();
-            pendingOp = op;
-            currentInput = "";
-        }
-    }
-
-    void calculate() {
-        double val = currentInput.isEmpty() ? 0 : Double.parseDouble(currentInput);
-        switch (pendingOp) {
-            case '+': result += val; break;
-            case '-': result -= val; break;
-            case '*': result *= val; break;
-            case '/':
-                if (val == 0) {
-                    display.setText("Error");
-                    result = 0;
-                    return;
+        sendButton.setOnClickListener(v -> {
+            String msg = messageInput.getText().toString().trim();
+            if (!msg.isEmpty() && socket != null) {
+                try {
+                    JSONObject data = new JSONObject();
+                    data.put("chatId", CURRENT_ROOM);
+                    data.put("type", "chat");
+                    data.put("sender", currentUsername);
+                    data.put("message", msg);
+                    data.put("mediaUrl", "");
+                    socket.emit("send_message", data);
+                    messageInput.setText("");
+                } catch (JSONException e) {
+                    e.printStackTrace();
                 }
-                result /= val;
-                break;
-            default: result = val;
+            }
+        });
+    }
+
+    private void loadLocalCachedMessages() {
+        List<MessageEntity> cached = db.messageDao().getMessagesForRoom(CURRENT_ROOM);
+        if (cached != null && !cached.isEmpty()) {
+            messageList.clear();
+            for (MessageEntity entity : cached) {
+                boolean isMine = entity.getSender().equals(currentUsername);
+                messageList.add(new ChatMessage(entity.getSender(), entity.getMessage(), entity.getMediaUrl(), isMine));
+            }
+            chatAdapter.notifyDataSetChanged();
+            recyclerViewChat.scrollToPosition(messageList.size() - 1);
         }
     }
-}
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (socket != null) {
+            socket.disconnect();
+        }
+    }
+                     }
+    
