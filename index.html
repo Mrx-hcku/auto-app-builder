@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>App Builder</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, Roboto, sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    margin: 0;
+    padding: 20px;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p.sub { color: #8b949e; font-size: 13px; margin-top: 0; margin-bottom: 20px; }
+  label { font-size: 13px; color: #8b949e; display: block; margin-top: 14px; margin-bottom: 4px; }
+  input[type=text], input[type=password], textarea {
+    width: 100%;
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 8px;
+    color: #e6edf3;
+    padding: 10px 12px;
+    font-size: 15px;
+  }
+  textarea { min-height: 70px; resize: vertical; }
+  button {
+    width: 100%;
+    margin-top: 18px;
+    padding: 14px;
+    border: none;
+    border-radius: 8px;
+    background: #238636;
+    color: white;
+    font-size: 16px;
+    font-weight: 600;
+  }
+  button:disabled { background: #30363d; color: #8b949e; }
+  #status {
+    margin-top: 20px;
+    padding: 12px;
+    border-radius: 8px;
+    background: #161b22;
+    border: 1px solid #30363d;
+    font-size: 14px;
+    white-space: pre-wrap;
+    min-height: 20px;
+  }
+  a.download-btn {
+    display: block;
+    margin-top: 14px;
+    padding: 14px;
+    border-radius: 8px;
+    background: #1f6feb;
+    color: white;
+    text-align: center;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  details { margin-top: 20px; }
+  summary { color: #8b949e; font-size: 13px; cursor: pointer; }
+</style>
+</head>
+<body>
+
+<h1>📱 App Builder</h1>
+<p class="sub">Type a command, tap Build, get your APK.</p>
+
+<label>GitHub Personal Access Token</label>
+<input type="password" id="token" placeholder="ghp_xxxxxxxxxxxx">
+<label style="display:flex; align-items:center; gap:6px; margin-top:8px; font-size:13px;">
+  <input type="checkbox" id="rememberToken" style="width:auto;"> Remember token on this device
+</label>
+
+<label>Command</label>
+<textarea id="command" placeholder="e.g. add a settings screen with dark mode toggle"></textarea>
+
+<button id="buildBtn" onclick="startBuild()">🚀 Build APK</button>
+
+<div id="status">Ready.</div>
+<div id="downloadArea"></div>
+
+<details>
+  <summary>Where do I get a token?</summary>
+  <p style="color:#8b949e; font-size:13px;">
+  GitHub → Settings → Developer settings → Personal access tokens → Tokens (classic) →
+  Generate new token → tick "repo" and "workflow" scopes → Generate → copy it here.
+  The token is only kept in this page's memory, never saved or sent anywhere except GitHub's API.
+  </p>
+</details>
+
+<script>
+const owner = "Mrx-hcku";
+const repo = "auto-app-builder";
+let token, command;
+
+function setStatus(msg) {
+  document.getElementById('status').textContent = msg;
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  const saved = localStorage.getItem('gh_token');
+  if (saved) {
+    document.getElementById('token').value = saved;
+    document.getElementById('rememberToken').checked = true;
+  }
+});
+
+async function startBuild() {
+  token = document.getElementById('token').value.trim();
+  command = document.getElementById('command').value.trim();
+
+  if (!token) {
+    setStatus('⚠️ Please enter your GitHub token.');
+    return;
+  }
+
+  if (document.getElementById('rememberToken').checked) {
+    localStorage.setItem('gh_token', token);
+  } else {
+    localStorage.removeItem('gh_token');
+  }
+
+  document.getElementById('buildBtn').disabled = true;
+  document.getElementById('downloadArea').innerHTML = '';
+  setStatus('Triggering build...');
+
+  try {
+    const dispatchRes = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/build.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json'
+        },
+        body: JSON.stringify({ ref: 'main', inputs: { command: command } })
+      }
+    );
+
+    if (!dispatchRes.ok) {
+      const err = await dispatchRes.text();
+      throw new Error(`Failed to trigger workflow (${dispatchRes.status}): ${err}`);
+    }
+
+    setStatus('Build triggered. Waiting for it to start...');
+    await sleep(5000);
+
+    const runId = await findLatestRun();
+    if (!runId) throw new Error('Could not find the workflow run.');
+
+    setStatus(`Build running (run #${runId})...\nThis usually takes 2-5 minutes.`);
+    await pollUntilComplete(runId);
+
+  } catch (e) {
+    setStatus('❌ Error: ' + e.message);
+  } finally {
+    document.getElementById('buildBtn').disabled = false;
+  }
+}
+
+async function findLatestRun() {
+  for (let i = 0; i < 6; i++) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/build.yml/runs?per_page=1`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' } }
+    );
+    const data = await res.json();
+    if (data.workflow_runs && data.workflow_runs.length > 0) {
+      return data.workflow_runs[0].id;
+    }
+    await sleep(3000);
+  }
+  return null;
+}
+
+async function pollUntilComplete(runId) {
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}`,
+      { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' } }
+    );
+    const run = await res.json();
+
+    if (run.status === 'completed') {
+      if (run.conclusion === 'success') {
+        setStatus('✅ Build succeeded! Fetching APK...');
+        await fetchArtifact(runId);
+      } else {
+        setStatus(`❌ Build failed (${run.conclusion}). Check the Actions tab on GitHub for logs.`);
+      }
+      return;
+    }
+
+    setStatus(`Build status: ${run.status}...\n(checking again in 10s)`);
+    await sleep(10000);
+  }
+}
+
+async function fetchArtifact(runId) {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/actions/runs/${runId}/artifacts`,
+    { headers: { 'Authorization': `Bearer ${token}`, 'Accept': 'application/vnd.github+json' } }
+  );
+  const data = await res.json();
+
+  if (!data.artifacts || data.artifacts.length === 0) {
+    setStatus('⚠️ Build succeeded but no artifact found.');
+    return;
+  }
+
+  const artifact = data.artifacts[0];
+  const downloadUrl = `https://api.github.com/repos/${owner}/${repo}/actions/artifacts/${artifact.id}/zip`;
+
+  const dlRes = await fetch(downloadUrl, {
+    headers: { 'Authorization': `Bearer ${token}` }
+  });
+  const blob = await dlRes.blob();
+  const blobUrl = URL.createObjectURL(blob);
+
+  setStatus('✅ Done! Your APK is ready (inside a zip — extract it to install).');
+  document.getElementById('downloadArea').innerHTML =
+    `<a class="download-btn" href="${blobUrl}" download="${artifact.name}.zip">⬇️ Download APK (zip)</a>`;
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+</script>
+
+</body>
+  </html>
