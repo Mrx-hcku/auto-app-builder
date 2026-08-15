@@ -1,150 +1,153 @@
 package com.mycompany.calc;
 
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.widget.Button;
 import android.widget.EditText;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.widget.Toolbar;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
-import org.json.JSONException;
+import io.socket.client.IO;
+import io.socket.client.Socket;
 import org.json.JSONObject;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
-import io.socket.client.IO;
-import io.socket.client.Socket;
 
 public class MainActivity extends AppCompatActivity {
     private Socket socket;
-    private EditText messageInput;
-    private RecyclerView recyclerViewChat;
+    private EditText inputMessage;
+    private Button btnSend;
+    private RecyclerView recyclerView;
     private ChatAdapter chatAdapter;
-    private List<ChatMessage> messageList = new ArrayList<>();
-    private String currentUsername = "GuestUser";
-    private AppDatabase db;
-    private final String CURRENT_ROOM = "global_room";
-    private final String SERVER_URL = "https://messgram-k4vn.onrender.com/";
+    private List<ChatMessage> chatList = new ArrayList<>();
+    private String username, chatId = "global_room";
+    private ChatDao chatDao;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // --- Session Guard Check ---
+        SharedPreferences prefs = getSharedPreferences("MessgramPrefs", MODE_PRIVATE);
+        boolean isLoggedIn = prefs.getBoolean("isLoggedIn", false);
+        
+        if (!isLoggedIn) {
+            startActivity(new Intent(MainActivity.this, LoginActivity.class));
+            finish();
+            return;
+        }
+
         setContentView(R.layout.activity_main);
 
-        SharedPreferences prefs = getSharedPreferences("MessgramPrefs", MODE_PRIVATE);
-        currentUsername = prefs.getString("username", "GuestUser");
+        // Setup Toolbar
+        Toolbar toolbar = findViewById(R.id.toolbar);
+        setSupportActionBar(toolbar);
 
-        db = AppDatabase.getInstance(this);
+        username = prefs.getString("username", "Guest");
 
-        messageInput = findViewById(R.id.messageInput);
-        Button sendButton = findViewById(R.id.sendButton);
-        recyclerViewChat = findViewById(R.id.recyclerViewChat);
+        inputMessage = findViewById(R.id.inputMessage);
+        btnSend = findViewById(R.id.btnSend);
+        recyclerView = findViewById(R.id.recyclerViewChat);
 
-        LinearLayoutManager layoutManager = new LinearLayoutManager(this);
-        layoutManager.setStackFromEnd(true);
-        recyclerViewChat.setLayoutManager(layoutManager);
+        chatDao = AppDatabase.getInstance(this).chatDao();
 
-        chatAdapter = new ChatAdapter(messageList);
-        recyclerViewChat.setAdapter(chatAdapter);
+        // Load offline cached messages from Room DB first
+        chatList.addAll(chatDao.getMessagesForRoom(chatId));
+        chatAdapter = new ChatAdapter(chatList, username);
+        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        recyclerView.setAdapter(chatAdapter);
+        if (!chatList.isEmpty()) {
+            recyclerView.scrollToPosition(chatList.size() - 1);
+        }
 
-        // Load cached offline messages instantly
-        loadLocalCachedMessages();
-
+        // Connect Socket.io to Render Backend Server
         try {
-            socket = IO.socket(SERVER_URL);
+            socket = IO.socket("https://messgram-k4vn.onrender.com");
         } catch (URISyntaxException e) {
             e.printStackTrace();
         }
 
         socket.connect();
-        socket.emit("join_room", CURRENT_ROOM);
+        socket.emit("join_room", chatId);
 
-        socket.on("load_history", args -> {
+        // Listen for live incoming messages
+        socket.on("receive_message", args -> {
             try {
-                org.json.JSONArray history = (org.json.JSONArray) args[0];
-                List<MessageEntity> entities = new ArrayList<>();
+                JSONObject data = (JSONObject) args[0];
+                String sender = data.getString("sender");
+                String message = data.getString("message");
+                String mediaUrl = data.optString("mediaUrl", "");
+                long timestamp = data.optLong("timestamp", System.currentTimeMillis());
+
+                ChatMessage chatMessage = new ChatMessage(chatId, sender, message, mediaUrl, timestamp);
                 
-                runOnUiThread(() -> messageList.clear());
+                // Save to local Room Database
+                chatDao.insertMessage(chatMessage);
 
-                for (int i = 0; i < history.length(); i++) {
-                    JSONObject obj = history.getJSONObject(i);
-                    String msgId = obj.optString("_id", UUID.randomUUID().toString());
-                    String sender = obj.getString("sender");
-                    String msg = obj.optString("message", "");
-                    String mediaUrl = obj.optString("mediaUrl", "");
-                    long timestamp = obj.optLong("timestamp", System.currentTimeMillis());
-
-                    entities.add(new MessageEntity(msgId, CURRENT_ROOM, sender, msg, mediaUrl, "", false, timestamp));
-
-                    boolean isMine = sender.equals(currentUsername);
-                    runOnUiThread(() -> messageList.add(new ChatMessage(sender, msg, mediaUrl, isMine)));
-                }
-
-                db.messageDao().insertAll(entities);
                 runOnUiThread(() -> {
-                    chatAdapter.notifyDataSetChanged();
-                    if (!messageList.isEmpty()) {
-                        recyclerViewChat.scrollToPosition(messageList.size() - 1);
-                    }
+                    chatList.add(chatMessage);
+                    chatAdapter.notifyItemInserted(chatList.size() - 1);
+                    recyclerView.scrollToPosition(chatList.size() - 1);
                 });
             } catch (Exception e) {
                 e.printStackTrace();
             }
         });
 
-        socket.on("receive_message", args -> {
-            JSONObject data = (JSONObject) args[0];
-            try {
-                String msgId = data.optString("_id", UUID.randomUUID().toString());
-                String sender = data.getString("sender");
-                String msg = data.optString("message", "");
-                String mediaUrl = data.optString("mediaUrl", "");
-                long timestamp = System.currentTimeMillis();
-
-                db.messageDao().insertMessage(new MessageEntity(msgId, CURRENT_ROOM, sender, msg, mediaUrl, "", false, timestamp));
-
-                boolean isMine = sender.equals(currentUsername);
-                runOnUiThread(() -> {
-                    messageList.add(new ChatMessage(sender, msg, mediaUrl, isMine));
-                    chatAdapter.notifyItemInserted(messageList.size() - 1);
-                    recyclerViewChat.scrollToPosition(messageList.size() - 1);
-                });
-            } catch (JSONException e) {
-                e.printStackTrace();
-            }
-        });
-
-        sendButton.setOnClickListener(v -> {
-            String msg = messageInput.getText().toString().trim();
-            if (!msg.isEmpty() && socket != null) {
+        // Send Message Event
+        btnSend.setOnClickListener(v -> {
+            String msgText = inputMessage.getText().toString().trim();
+            if (!msgText.isEmpty()) {
                 try {
-                    JSONObject data = new JSONObject();
-                    data.put("chatId", CURRENT_ROOM);
-                    data.put("type", "chat");
-                    data.put("sender", currentUsername);
-                    data.put("message", msg);
-                    data.put("mediaUrl", "");
-                    socket.emit("send_message", data);
-                    messageInput.setText("");
-                } catch (JSONException e) {
+                    JSONObject jsonObject = new JSONObject();
+                    jsonObject.put("chatId", chatId);
+                    jsonObject.put("type", "chat");
+                    jsonObject.put("sender", username);
+                    jsonObject.put("message", msgText);
+                    jsonObject.put("mediaUrl", "");
+
+                    socket.emit("send_message", jsonObject);
+                    inputMessage.setText("");
+                } catch (Exception e) {
                     e.printStackTrace();
                 }
             }
         });
     }
 
-    private void loadLocalCachedMessages() {
-        List<MessageEntity> cached = db.messageDao().getMessagesForRoom(CURRENT_ROOM);
-        if (cached != null && !cached.isEmpty()) {
-            messageList.clear();
-            for (MessageEntity entity : cached) {
-                boolean isMine = entity.getSender().equals(currentUsername);
-                messageList.add(new ChatMessage(entity.getSender(), entity.getMessage(), entity.getMediaUrl(), isMine));
-            }
-            chatAdapter.notifyDataSetChanged();
-            recyclerViewChat.scrollToPosition(messageList.size() - 1);
+    // Add Logout option in Toolbar Menu
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        getMenuInflater().inflate(R.menu.main_menu, menu); // Ensure menu file exists or create programmatically if needed
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
+        if (item.getItemId() == R.id.action_logout || item.getTitle() != null && item.getTitle().equals("Logout")) {
+            logoutUser();
+            return true;
         }
+        return super.onOptionsItemSelected(item);
+    }
+
+    private void logoutUser() {
+        SharedPreferences.Editor editor = getSharedPreferences("MessgramPrefs", MODE_PRIVATE).edit();
+        editor.clear();
+        editor.apply();
+
+        if (socket != null) {
+            socket.disconnect();
+        }
+
+        startActivity(new Intent(MainActivity.this, LoginActivity.class));
+        finish();
     }
 
     @Override
@@ -154,5 +157,5 @@ public class MainActivity extends AppCompatActivity {
             socket.disconnect();
         }
     }
-                     }
-    
+                          }
+            
