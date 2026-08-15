@@ -1,9 +1,9 @@
 import os
 import sys
-from groq import Groq  # ya aap OpenAI/Gemini API use kar sakte hain
+from groq import Groq
 
-# Apni Groq API Key yahan dalein ya Environment variable me set karein
-client = Groq(api_key=os.environ.get("GROQ_API_KEY", "Aapki_Groq_API_Key"))
+# Aapki API key direct set kar di gayi hai
+client = Groq(api_key="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")
 
 def generate_app_code(prompt):
     system_prompt = """
@@ -15,7 +15,7 @@ def generate_app_code(prompt):
     """
     
     response = client.chat.completions.create(
-        model="llama3-70b-8192",  # ya koi aur valid model
+        model="llama3-70b-8192",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
