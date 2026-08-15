@@ -2,7 +2,7 @@ import os
 import sys
 from groq import Groq
 
-# Aapki API key direct set kar di gayi hai
+# Groq client initialization with API key
 client = Groq(api_key="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")
 
 def generate_app_code(prompt):
@@ -15,7 +15,7 @@ def generate_app_code(prompt):
     """
     
     response = client.chat.completions.create(
-        model="llama3-70b-8192",
+        model="llama-3.3-70b-versatile",  # Groq ka sabse best aur latest free coding model
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt}
